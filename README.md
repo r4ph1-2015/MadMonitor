@@ -20,3 +20,6 @@ After the installation, the Show-Notification function in the script should be a
 7.Use Win+R and Enter (The Location of the Monitor.cmd file)\Monitor.cmd
 8.You will get two cmd windows running Powershell with MadMonitor
 9.You can look at the Data shown by Mad Monitor
+
+Release Notes :
+V1 - Added A Second Window for Network Data Viewing , Added New Features , Fixed Some Bugs.
