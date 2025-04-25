@@ -286,3 +286,5 @@ Mad Monitor V2 is distributed under the Apache License. See the LICENSE file for
 
 Release Notes :
 V1 - Added A Second Window for Network Data Viewing , Added New Features , Fixed Some Bugs.
+V2 - Fixed Bugs,More Features and etc
+V3 (in development) - More Features , Easier to use, One window
