@@ -1,305 +1,305 @@
 <#
 .SYNOPSIS
-System Monitoring Script
+    Monitors system resources and triggers alerts based on defined thresholds.
 
 .DESCRIPTION
-This script monitors system performance, including CPU usage, memory utilization,
-disk usage, uptime, battery, GPU, CPU temperature, and OS info.
-It logs entries in "Monitor.txt" and can export CSV history (if -CSVLogging is used).
+    This script monitors various system resources (e.g., CPU usage, memory usage, disk space, battery status)
+    and triggers alerts when specified thresholds are exceeded. It is designed to be
+    customizable and extensible.
 
-.PARAMETER CSVLogging
-Switch to enable CSV logging (metrics_history.csv).
-
-.PARAMETER HighCPUThreshold
-CPU usage threshold for notifications (default: 80%).
-
-.PARAMETER HighMemoryThreshold
-Memory usage threshold for notifications (default: 80%).
-
-.PARAMETER LowHealthThreshold
-Health score threshold for notifications (default: 70%).
-
-.EXAMPLE
-.\SystemMonitor.ps1 -CSVLogging -HighCPUThreshold 85 -HighMemoryThreshold 85 -LowHealthThreshold 65
+.NOTES
+    Author: [Your Name]
+    Version: 2.0
+    Date: [Current Date]
 #>
-param(
-    [switch]$CSVLogging,
-    [int]$HighCPUThreshold = 80,
-    [int]$HighMemoryThreshold = 80,
-    [int]$LowHealthThreshold = 70
+
+#region Configuration
+
+# Configuration Section
+# ---------------------
+#  This section defines the parameters and settings for the script.
+#  It should be easily customizable by the user.
+
+# Define resources to monitor and their thresholds
+$ResourcesToMonitor = @(
+    @{
+        Name              = "CPU Usage";
+        Script            = {
+            Get-Counter -Counter "\Processor(_Total)\% Processor Time" -SampleInterval 1 -MaxSamples 1 |
+            Select-Object -ExpandProperty CounterSamples |
+            Select-Object -ExpandProperty CookedValue
+        };
+        Threshold         = 80;    # Percentage
+        AlertType         = "High CPU Usage";
+        ComparisonOperator = "GreaterThan";
+    },
+    @{
+        Name              = "Memory Usage";
+        Script            = {
+            Get-Counter -Counter "\Memory\Available MBytes" -SampleInterval 1 -MaxSamples 1 |
+            Select-Object -ExpandProperty CounterSamples |
+            Select-Object -ExpandProperty CookedValue
+        };
+        Threshold         = 500;   # MB
+        AlertType         = "Low Memory";
+        ComparisonOperator = "LessThan";
+    },
+    @{
+        Name              = "Disk Space (C:)";
+        Script            = {
+            Get-PSDrive -PSProvider FileSystem |
+            Where-Object { $_.Root -eq "C:" } |
+            Select-Object FreeSpace |
+            ForEach-Object { $_.FreeSpace / 1GB }
+        };
+        Threshold         = 20;    # GB
+        AlertType         = "Low Disk Space";
+        ComparisonOperator = "LessThan";
+    },
+    @{ # Added Battery Monitoring
+        Name              = "Battery Level";
+        Script            = {
+            $batteryInfo = Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue
+            if ($batteryInfo) {
+                #check if battery level is null or empty
+                if ($batteryInfo.BatteryLevel -eq $null -or $batteryInfo.BatteryLevel -eq ""){
+                    Write-Warning "Battery Level is not available"
+                    return $null
+                }
+                else{
+                  return $batteryInfo.BatteryLevel
+                }
+
+            }
+            else {
+                Write-Warning "No battery information available."
+                return $null
+            }
+        };
+        Threshold         = 20;    # Percentage
+        AlertType         = "Low Battery";
+        ComparisonOperator = "LessThan";
+        Enabled           = $true; # You can disable this if needed
+    }
 )
 
-# ---------------------------
-# Global File Names
-# ---------------------------
-$logFile = "Monitor.txt"
-
-# Create or initialize the monitor log file if needed.
-if (-not (Test-Path $logFile)) {
-    "Timestamp, CPU (%), Memory (Used/Total MB, %), Uptime, Disk Usage, GPU, Health Score, AI Recommendations" | Out-File $logFile
+# Define notification methods
+$NotificationMethods = @{
+    Email    = @{
+        Enabled    = $false;
+        From       = "sender@example.com";
+        To         = "recipient@example.com";
+        Subject    = "System Alert";
+        SmtpServer = "smtp.example.com";
+    };
+    EventLog = @{
+        Enabled  = $true;
+        LogName    = "Application";
+        Source     = "MadMonitor";
+    };
+    Popup    = @{
+        Enabled  = $true;
+    };
+    Sound    = @{
+        Enabled    = $false;
+        SoundPath  = "C:\Windows\Media\Alarm01.wav";
+    };
+    Script   = @{ # Added Script Notification
+        Enabled = $false;
+        ScriptPath = "C:\path\to\your\script.ps1"; #path to script
+    }
 }
 
-# ---------------------------
-# Global Variables & Caches
-# ---------------------------
-if (-not $global:currentLogHour) {
-    $global:currentLogHour = (Get-Date -Format "HH")
-}
-# Setup CSV history collection if enabled.
-if ($CSVLogging) {
-    $global:metricsHistory = @()
-}
+# Polling interval (in seconds)
+$PollingInterval = 5
 
-# For notification rate limiting (at most one every 60 seconds)
-$global:lastNotificationTime = (Get-Date).AddSeconds(-60)
+#endregion
 
-# Global anger counters for notifications
-if (-not $global:cpuAngerLevel)    { $global:cpuAngerLevel = 0 }
-if (-not $global:memoryAngerLevel) { $global:memoryAngerLevel = 0 }
-if (-not $global:healthAngerLevel) { $global:healthAngerLevel = 0 }
+#region Functions
 
-# ---------------------------
-# Helper Functions
-# ---------------------------
+# Function Definitions
+# ------------------
+# This section defines the functions used by the script.
 
-# Show Desktop Notification (requires BurntToast if available)
-function Show-Notification {
-    param (
-        [string]$Title,
-        [string]$Message
+# Function to get resource usage
+function Get-ResourceUsage {
+    param(
+        [scriptblock]$Script
     )
     try {
-        if (Get-Module -ListAvailable -Name BurntToast) {
-            Import-Module BurntToast -ErrorAction SilentlyContinue
-            New-BurntToastNotification -Text $Title, $Message
-        } else {
-            Write-Host "Notification: $Title - $Message"
-        }
+        $usage = Invoke-Command -ScriptBlock $Script -ErrorAction Stop #stop on error
+        return $usage
     }
     catch {
-        Write-Host "Notification Error: $_"
+        Write-Error "Error getting resource usage: $($_.Exception.Message)"
+        return $null
     }
 }
 
-# Get CPU Temperature (if available via MSAcpi_ThermalZoneTemperature)
-function Get-CPUTemperature {
-    try {
-        $tempObj = Get-WmiObject MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue
-        if ($tempObj -and $tempObj.CurrentTemperature) {
-            $celsius = ($tempObj.CurrentTemperature / 10) - 273.15
-            return [math]::Round($celsius, 2)
+# Function to check threshold and trigger alert
+function Check-Threshold {
+    param(
+        [string]$Name,
+        [object]$Value,
+        [int]$Threshold,
+        [string]$AlertType,
+        [string]$ComparisonOperator = "GreaterThan" # Default comparison
+    )
+
+    $TriggerAlert = $false
+
+    #check if value is null
+    if ($Value -eq $null){
+        Write-Warning "Value for $($Name) is null, cannot compare"
+        return
+    }
+
+    #check if value is numeric
+    if ($Value -notmatch "^\d+$"){
+        Write-Warning "Value for $($Name) is not numeric, cannot compare"
+        return
+    }
+
+    switch ($ComparisonOperator) {
+        "GreaterThan" {
+            if ($Value -gt $Threshold) {
+                $TriggerAlert = $true
+            }
         }
-    } catch {
-        return "N/A"
-    }
-    return "N/A"
-}
-
-# Get CPU Frequency (MHz) from WMI
-function Get-CPUFrequency {
-    try {
-        $proc = Get-WmiObject Win32_Processor -ErrorAction SilentlyContinue
-        if ($proc -and $proc.CurrentClockSpeed) {
-            return $proc.CurrentClockSpeed
+        "LessThan" {
+            if ($Value -lt $Threshold) {
+                $TriggerAlert = $true
+            }
         }
-    } catch {
-        return "N/A"
+        "Equals" {
+            if ($Value -eq $Threshold) {
+                $TriggerAlert = $true
+            }
+        }
+        default {
+            Write-Warning "Invalid ComparisonOperator.  Defaulting to GreaterThan."
+            if ($Value -gt $Threshold) {
+                $TriggerAlert = $true
+            }
+        }
     }
-    return "N/A"
+
+    if ($TriggerAlert) {
+        Write-Warning "$Name is above threshold ($Value > $Threshold). Alert triggered."
+        Send-Notification -AlertType $AlertType -Value $Value -ResourceName $Name
+    }
 }
 
-# ---------------------------
-# Main Loop
-# ---------------------------
+# Function to send notifications
+function Send-Notification {
+    param(
+        [string]$AlertType,
+        [object]$Value,
+        [string]$ResourceName
+    )
+
+    $message = "$AlertType: $ResourceName is at $Value."
+
+    # Send email notification
+    if ($NotificationMethods.Email.Enabled) {
+        try {
+            Send-MailMessage -From $NotificationMethods.Email.From -To $NotificationMethods.Email.To -Subject $NotificationMethods.Email.Subject -Body $message -SmtpServer $NotificationMethods.Email.SmtpServer -ErrorAction Stop
+            Write-Verbose "Email sent."
+        }
+        catch {
+            Write-Error "Failed to send email: $($_.Exception.Message)"
+        }
+    }
+
+    # Write to Event Log
+    if ($NotificationMethods.EventLog.Enabled) {
+        try {
+            Write-EventLog -LogName $NotificationMethods.EventLog.LogName -Source $NotificationMethods.EventLog.Source -EntryType Warning -Message $message -ErrorAction Stop
+            Write-Verbose "Event Log entry written."
+        }
+        catch {
+            Write-Error "Failed to write to Event Log: $($_.Exception.Message)"
+        }
+    }
+
+    # Display a popup
+    if ($NotificationMethods.Popup.Enabled) {
+        try {
+            Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+            [System.Windows.Forms.MessageBox]::Show($message, "Alert", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        }
+        catch {
+            Write-Error "Failed to display popup: $($_.Exception.Message)"
+        }
+    }
+
+    # Play sound
+    if ($NotificationMethods.Sound.Enabled) {
+        try {
+            [System.Media.SoundPlayer]::PlaySync($NotificationMethods.Sound.SoundPath)
+        }
+        catch {
+            Write-Error "Failed to play sound: $($_.Exception.Message)"
+        }
+    }
+
+    #run script
+    if ($NotificationMethods.Script.Enabled) {
+        try {
+            $scriptPath = $NotificationMethods.Script.ScriptPath
+            if (Test-Path -Path $scriptPath) {
+                # Pass the alert details as arguments to the script
+                $arguments = @{
+                    AlertType    = $AlertType
+                    Value        = $Value
+                    ResourceName = $ResourceName
+                    Message      = $message
+                }
+                Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"", "-ArgumentList $($arguments | ConvertTo-String)" -Wait
+                Write-Verbose "Script executed: $scriptPath"
+            }
+            else {
+                Write-Error "Script not found: $scriptPath"
+            }
+
+        }
+        catch {
+            Write-Error "Failed to execute script: $($_.Exception.Message)"
+        }
+    }
+}
+
+#endregion
+
+#region Main Script
+
+# Main Script Logic
+# ----------------
+# This section contains the main script logic that runs continuously.
+
+Write-Host "Mad Monitor V2 is starting..."
+
 while ($true) {
-    $currentTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    foreach ($resource in $ResourcesToMonitor) {
+        if ($resource.Enabled -ne $false) { #check if the resource is enabled.
+            $resourceName = $resource.Name
+            $resourceValue = Get-ResourceUsage -Script $resource.Script
+            $resourceThreshold = $resource.Threshold
+            $alertType = $resource.AlertType
+            $comparison = $resource.ComparisonOperator # Get the comparison operator
 
-    # === SYSTEM METRICS ===
-    # CPU & Frequency
-    $cpuCounter = Get-Counter '\Processor(_Total)\% Processor Time'
-    $cpuUsage = [math]::Round($cpuCounter.CounterSamples[0].CookedValue, 2)
-    $cpuFreq  = Get-CPUFrequency
-
-    # Memory
-    $os = Get-CimInstance Win32_OperatingSystem
-    $totalMemoryMB = [math]::Round($os.TotalVisibleMemorySize/1024,2)
-    $freeMemoryMB  = [math]::Round($os.FreePhysicalMemory/1024,2)
-    $usedMemoryMB  = [math]::Round($totalMemoryMB - $freeMemoryMB,2)
-    $memoryUsagePercent = [math]::Round(($usedMemoryMB/$totalMemoryMB)*100,2)
-
-    # Disk usage & Disk I/O counters
-    $diskOutput = @()
-    $diskUsages = @()
-    $diskDrives = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3"
-    foreach ($drive in $diskDrives) {
-        $device = $drive.DeviceID
-        $totalSizeGB = [math]::Round($drive.Size/1GB,2)
-        $freeSpaceGB = [math]::Round($drive.FreeSpace/1GB,2)
-        $usedSpaceGB = [math]::Round($totalSizeGB - $freeSpaceGB,2)
-        $usagePercent = if($totalSizeGB -gt 0){ [math]::Round(($usedSpaceGB/$totalSizeGB)*100,2) } else { 0 }
-        $diskOutput += "Drive ${device}: ${usedSpaceGB}GB used / ${totalSizeGB}GB total (${usagePercent}% used)"
-        $diskUsages += $usagePercent
-    }
-    $averageDiskUsage = if($diskUsages.Count -gt 0){ [math]::Round(($diskUsages | Measure-Object -Average).Average,2) } else { 0 }
-    $diskRead  = Get-Counter '\PhysicalDisk(_Total)\Disk Read Bytes/sec' -ErrorAction SilentlyContinue
-    $diskWrite = Get-Counter '\PhysicalDisk(_Total)\Disk Write Bytes/sec' -ErrorAction SilentlyContinue
-    $readRate  = if($diskRead){ [math]::Round($diskRead.CounterSamples[0].CookedValue/1024,2) } else { "N/A" }
-    $writeRate = if($diskWrite){ [math]::Round($diskWrite.CounterSamples[0].CookedValue/1024,2) } else { "N/A" }
-
-    # Uptime & OS Info
-    $uptimeTimespan = (Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
-    $uptimeFormatted = "$($uptimeTimespan.Days)d $($uptimeTimespan.Hours)h $($uptimeTimespan.Minutes)m"
-    $machineName = $env:COMPUTERNAME
-    $osVersion   = (Get-CimInstance win32_operatingsystem).Caption
-
-    # Battery, GPU, CPU Temperature and Gateway Latency
-    $battery = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue
-    $batteryStatus = "N/A" # Default value
-    if ($battery) {
-        $batteryStatus = "$($battery.EstimatedChargeRemaining)%"
-        # Get the battery status description.
-        switch ($battery.BatteryStatus) {
-            0 { $batteryStatus += " - Status: Other" }
-            1 { $batteryStatus += " - Status: Discharging" }
-            2 { $batteryStatus += " - Status: AC connected" }
-            3 { $batteryStatus += " - Status: Fully charged" }
-            4 { $batteryStatus += " - Status: Low" }
-            5 { $batteryStatus += " - Status: Critical" }
-            6 { $batteryStatus += " - Status: Charging" }
-            7 { $batteryStatus += " - Status: Charging and High" }
-            8 { $batteryStatus += " - Status: Charging and Low" }
-            9 { $batteryStatus += " - Status: Charging and Critical" }
-            default { $batteryStatus += " - Status: Unknown" }
-        }
-    }
-    else
-    {
-        $batteryStatus = "N/A (Not a laptop)"
-    }
-
-    $gpuCounter = Get-Counter '\GPU Engine(_Total)\Utilization Percentage' -ErrorAction SilentlyContinue
-    $gpuUsage = if($gpuCounter){ [math]::Round($gpuCounter.CounterSamples[0].CookedValue,2) } else { "N/A" }
-    $cpuTemp = Get-CPUTemperature
-
-
-    # === HEALTH SCORE & AI RECOMMENDATIONS ===
-    $healthScore = 100 - ([math]::Round(($cpuUsage + $memoryUsagePercent + $averageDiskUsage)/3,2))
-    if ($healthScore -lt 0) { $healthScore = 0 }
-    $aiRecommendations = @()
-    if ($cpuUsage -gt $HighCPUThreshold) { $aiRecommendations += "High CPU usage ($cpuUsage%). Close non-essential processes." }
-    if ($memoryUsagePercent -gt $HighMemoryThreshold) { $aiRecommendations += "High Memory usage ($memoryUsagePercent%). Close memory‑intensive apps." }
-    if ($battery -and $battery.EstimatedChargeRemaining -lt 20) { $aiRecommendations += "Battery low ($($battery.EstimatedChargeRemaining)%). Plug in charger." }
-    if (($gpuUsage -ne "N/A") -and ($gpuUsage -gt 80)) { $aiRecommendations += "High GPU usage ($gpuUsage%)." }
-    foreach ($drive in $diskDrives) {
-        $device = $drive.DeviceID
-        $totalSizeGB = [math]::Round($drive.Size/1GB,2)
-        $freeSpaceGB = [math]::Round($drive.FreeSpace/1GB,2)
-        $usedSpaceGB = [math]::Round($totalSizeGB - $freeSpaceGB,2)
-        $usagePercent = if($totalSizeGB -gt 0){ [math]::Round(($usedSpaceGB/$totalSizeGB)*100,2) } else { 0 }
-        if ($usagePercent -gt 90) { $aiRecommendations += "Drive ${device} nearly full (${usagePercent}% used)." }
-    }
-    if ($healthScore -lt $LowHealthThreshold) { $aiRecommendations += "Low system health ($healthScore/100). Consider restart/closing apps." }
-    if ($aiRecommendations.Count -eq 0) { $aiRecommendations += "All systems optimal." }
-
-
-    # === OPTIONAL CSV LOGGING ===
-    if ($CSVLogging) {
-        $entry = [pscustomobject]@{
-            Timestamp             = $currentTime
-            CPU_Usage             = $cpuUsage
-            CPU_Frequency_MHz = $cpuFreq
-            Memory_Used_MB      = $usedMemoryMB
-            Total_Memory_MB     = $totalMemoryMB
-            Memory_Percent      = $memoryUsagePercent
-            Uptime                = $uptimeFormatted
-            OS                  = "$osVersion on $machineName"
-            Disk_Details          = ($diskOutput -join " | ") + " | Read: $readRate KB/s, Write: $writeRate KB/s"
-            CPU_Temperature     = $cpuTemp
-            GPU_Usage             = $gpuUsage
-            Health_Score          = $healthScore
-            AI_Recommendations  = ($aiRecommendations -join " ; ")
-        }
-        $global:metricsHistory += $entry
-        if ($global:metricsHistory.Count -ge 50) {
-            $global:metricsHistory | Export-Csv -Path "metrics_history.csv" -NoTypeInformation
-            $global:metricsHistory = @()
+            if ($resourceValue -ne $null) {
+                Check-Threshold -Name $resourceName -Value $resourceValue -Threshold $resourceThreshold -AlertType $alertType -ComparisonOperator $comparison
+            }
+            else {
+                Write-Warning "Could not retrieve value for $($resource.Name)"
+            }
         }
     }
 
-    # === DESKTOP NOTIFICATIONS (rate-limited, once per 60 sec) with Increasing Anger ===
-    $now = Get-Date
-    if (($now - $global:lastNotificationTime).TotalSeconds -ge 60) {
-        # CPU usage notification
-        if ($cpuUsage -gt $HighCPUThreshold) {
-            $global:cpuAngerLevel++
-            $cpuMessage = "CPU usage is at $cpuUsage% (Freq: $cpuFreq MHz). " + ("Stop slacking! " * $global:cpuAngerLevel) + "Do something NOW!"
-            Show-Notification -Title "High CPU Alert" -Message $cpuMessage
-            $global:lastNotificationTime = $now
-        }
-        else {
-            $global:cpuAngerLevel = 0
-        }
-        # Memory usage notification
-        if ($memoryUsagePercent -gt $HighMemoryThreshold) {
-            $global:memoryAngerLevel++
-            $memMessage = "Memory usage is at $memoryUsagePercent%. " + ("Get your act together! " * $global:memoryAngerLevel) + "Fix it NOW!"
-            Show-Notification -Title "High Memory Alert" -Message $memMessage
-            $global:lastNotificationTime = $now
-        }
-        else {
-            $global:memoryAngerLevel = 0
-        }
-        # System health notification
-        if ($healthScore -lt $LowHealthThreshold) {
-            $global:healthAngerLevel++
-            $healthMessage = "System health is low ($healthScore/100). " + ("I'm getting REALLY pissed off! " * $global:healthAngerLevel) + "Do something NOW!"
-            Show-Notification -Title "Low Health Score" -Message $healthMessage
-            $global:lastNotificationTime = $now
-        }
-        else {
-            $global:healthAngerLevel = 0
-        }
-    }
-
-    # === BUILD DASHBOARD OUTPUT ===
-    $output = @()
-    $output += "================== SYSTEM MONITOR =================="
-    $output += "$currentTime"
-    $output += "Machine: $machineName | OS: $osVersion"
-    $output += "-----------------------------------------------------------------"
-    $output += "SYSTEM METRICS:"
-    $output += "  CPU Usage: $cpuUsage% (Freq: $cpuFreq MHz) | Temp: $cpuTemp °C"
-    $output += "  Memory: $usedMemoryMB MB / $totalMemoryMB MB ($memoryUsagePercent%)"
-    $output += "  Uptime: $uptimeFormatted"
-    $output += "  Disk Usage: " + ($diskOutput -join " || ")
-    $output += "  Disk I/O: Read: $readRate KB/s, Write: $writeRate KB/s"
-    $output += "  Battery: $batteryStatus"
-    $output += "  GPU Usage: $gpuUsage %"
-    $output += ""
-    $output += "HEALTH SCORE: $healthScore/100"
-    $output += "AI Recommendations:"
-    $output += $aiRecommendations
-    $output += "================================================================="
-
-    # === DISPLAY (In-Place) ===
-    [Console]::SetCursorPosition(0,0)
-    $output | ForEach-Object { Write-Host $_ }
-    $linesPrinted = $output.Count
-    $windowHeight = [Console]::WindowHeight
-    for ($i=0; $i -lt ($windowHeight-$linesPrinted); $i++) { Write-Host "" }
-
-    # === APPEND TO MONITOR LOG (Hourly Grouping) ===
-    $currentHour = (Get-Date -Format "HH")
-    if ($global:currentLogHour -ne $currentHour) {
-        Add-Content -Path $logFile -Value ""
-        Add-Content -Path $logFile -Value ""
-        Add-Content -Path $logFile -Value ""
-        Add-Content -Path $logFile -Value "=== Entries for Hour $currentHour ==="
-        $global:currentLogHour = $currentHour
-    }
-    $logEntry = "$currentTime, CPU: $cpuUsage%, Mem: $usedMemoryMB/$totalMemoryMB MB ($memoryUsagePercent%), Uptime: $uptimeFormatted, Disk: $([string]::Join(' || ', $diskOutput)), Health: $healthScore, AI: $($aiRecommendations -join ' ; ')"
-    Add-Content -Path $logFile -Value $logEntry
-
-    # === PAUSE BEFORE NEXT UPDATE ===
-    Start-Sleep -Seconds 1.5
+    Start-Sleep -Seconds $PollingInterval
 }
+
+Write-Host "Mad Monitor V2 is stopping..."
+
+#endregion
